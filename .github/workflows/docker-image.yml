@@ -23,3 +23,6 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
     - name: Upload Docker image
       run: docker push ghcr.io/buschlab/fhirspark:latest
+
+permissions:
+  packages: write
