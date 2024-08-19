@@ -9,7 +9,6 @@ on:
 
 jobs:
   build:
-    if: github.repository == 'nr23730/fhirspark'
     services:
       hapiserver:
         image: hapiproject/hapi:v7.2.0
