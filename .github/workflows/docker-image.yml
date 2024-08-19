@@ -2,15 +2,11 @@ name: Docker Image CI
 
 on:
   push:
-    branches: [master]
+    branches: [latest-docker]
 
 jobs:
-
   build:
-    if: github.repository == 'buschlab/fhirspark'
-
     runs-on: ubuntu-latest
-
     steps:
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
