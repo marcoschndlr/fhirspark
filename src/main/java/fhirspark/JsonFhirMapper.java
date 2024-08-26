@@ -5,6 +5,8 @@ import ca.uhn.fhir.parser.DataFormatException;
 import ca.uhn.fhir.rest.client.api.IGenericClient;
 import ca.uhn.fhir.rest.gclient.ReferenceClientParam;
 import ca.uhn.fhir.rest.gclient.TokenClientParam;
+import ca.uhn.fhir.rest.server.exceptions.ResourceGoneException;
+import ca.uhn.fhir.rest.server.exceptions.ResourceNotFoundException;
 import ca.uhn.fhir.rest.server.exceptions.UnprocessableEntityException;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -14,38 +16,22 @@ import fhirspark.adapter.MtbAdapter;
 import fhirspark.adapter.TherapyRecommendationAdapter;
 import fhirspark.definitions.GenomicsReportingEnum;
 import fhirspark.definitions.Hl7TerminologyEnum;
+import fhirspark.definitions.Presentation;
 import fhirspark.definitions.UriEnum;
-import fhirspark.restmodel.CbioportalRest;
-import fhirspark.restmodel.Deletions;
-import fhirspark.restmodel.FollowUp;
-import fhirspark.restmodel.GeneticAlteration;
-import fhirspark.restmodel.Mtb;
-import fhirspark.restmodel.TherapyRecommendation;
+import fhirspark.restmodel.*;
 import fhirspark.settings.Settings;
 import org.hl7.fhir.instance.model.api.IAnyResource;
-import org.hl7.fhir.r4.model.Bundle;
+import org.hl7.fhir.r4.model.*;
 import org.hl7.fhir.r4.model.Bundle.BundleEntryComponent;
-import org.hl7.fhir.r4.model.DiagnosticReport;
-import org.hl7.fhir.r4.model.IdType;
-import org.hl7.fhir.r4.model.Identifier;
-import org.hl7.fhir.r4.model.Identifier.IdentifierUse;
-import org.hl7.fhir.r4.model.MedicationStatement;
-import org.hl7.fhir.r4.model.Observation;
-import org.hl7.fhir.r4.model.Patient;
 import org.hl7.fhir.r4.model.Reference;
-import org.hl7.fhir.r4.model.RelatedArtifact;
+import org.hl7.fhir.r4.model.Identifier.IdentifierUse;
 import org.hl7.fhir.r4.model.RelatedArtifact.RelatedArtifactType;
 
 import java.io.FileWriter;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * Fulfils the persistence in HL7 FHIR resources.
@@ -61,12 +47,11 @@ public class JsonFhirMapper {
     private static String mtbUri;
     private static Settings settings;
 
-    private FhirContext ctx = FhirContext.forR4();
-    private IGenericClient client;
-    private ObjectMapper objectMapper = new ObjectMapper(new JsonFactory());
+    private final FhirContext ctx = FhirContext.forR4();
+    private final IGenericClient client;
+    private final ObjectMapper objectMapper = new ObjectMapper(new JsonFactory());
 
     /**
-     *
      * Constructs a new FHIR mapper and stores the required configuration.
      *
      * @param settings Settings object with containing configuration
@@ -97,8 +82,8 @@ public class JsonFhirMapper {
     public String mtbToJson(String patientId) throws JsonProcessingException {
         List<Mtb> mtbs = new ArrayList<Mtb>();
         Bundle bPatient = (Bundle) client.search().forResource(Patient.class)
-                .where(new TokenClientParam("identifier").exactly().systemAndCode(patientUri, patientId)).prettyPrint()
-                .execute();
+            .where(new TokenClientParam("identifier").exactly().systemAndCode(patientUri, patientId)).prettyPrint()
+            .execute();
         Patient fhirPatient = (Patient) bPatient.getEntryFirstRep().getResource();
 
         if (fhirPatient == null) {
@@ -106,18 +91,17 @@ public class JsonFhirMapper {
         }
 
         Bundle bDiagnosticReports = (Bundle) client.search().forResource(DiagnosticReport.class)
-                .where(new ReferenceClientParam("subject").hasId(harmonizeId(fhirPatient))).prettyPrint()
-                .include(DiagnosticReport.INCLUDE_BASED_ON)
-                .include(DiagnosticReport.INCLUDE_RESULT.asRecursive())
-                .include(DiagnosticReport.INCLUDE_SPECIMEN.asRecursive()).execute();
+            .where(new ReferenceClientParam("subject").hasId(harmonizeId(fhirPatient))).prettyPrint()
+            .include(DiagnosticReport.INCLUDE_BASED_ON)
+            .include(DiagnosticReport.INCLUDE_RESULT.asRecursive())
+            .include(DiagnosticReport.INCLUDE_SPECIMEN.asRecursive()).execute();
 
         List<BundleEntryComponent> diagnosticReports = bDiagnosticReports.getEntry();
 
         for (int i = 0; i < diagnosticReports.size(); i++) {
-            if (!(diagnosticReports.get(i).getResource() instanceof DiagnosticReport)) {
+            if (!(diagnosticReports.get(i).getResource() instanceof DiagnosticReport diagnosticReport)) {
                 continue;
             }
-            DiagnosticReport diagnosticReport = (DiagnosticReport) diagnosticReports.get(i).getResource();
             mtbs.add(MtbAdapter.toJson(settings.getRegex(), patientId, diagnosticReport));
 
         }
@@ -161,6 +145,7 @@ public class JsonFhirMapper {
     /**
      * Retrieves MTB data from FHIR server and transforms it into JSON format for
      * cBioPortal.
+     *
      * @param patientId id of the patient.
      * @return JSON representation of the MTB data.
      * @throws JsonProcessingException if the JSON representation could not be created.
@@ -168,31 +153,30 @@ public class JsonFhirMapper {
     public String followUpToJson(String patientId) throws JsonProcessingException {
         List<FollowUp> followUps = new ArrayList<FollowUp>();
         Bundle bPatient = (Bundle) client.search().forResource(Patient.class)
-                .where(new TokenClientParam("identifier").exactly().systemAndCode(patientUri, patientId)).prettyPrint()
-                .execute();
+            .where(new TokenClientParam("identifier").exactly().systemAndCode(patientUri, patientId)).prettyPrint()
+            .execute();
         Patient fhirPatient = (Patient) bPatient.getEntryFirstRep().getResource();
 
         if (fhirPatient == null) {
             return this.objectMapper.writeValueAsString(
                 new CbioportalRest()
-                .withId(patientId)
-                .withFollowUps(followUps)
+                    .withId(patientId)
+                    .withFollowUps(followUps)
             );
         }
 
         Bundle bMedicationStatements = (Bundle) client.search().forResource(MedicationStatement.class)
-                .where(new ReferenceClientParam("subject").hasId(harmonizeId(fhirPatient))).prettyPrint()
-                .include(MedicationStatement.INCLUDE_PART_OF)
-                .include(MedicationStatement.INCLUDE_CONTEXT.asRecursive())
-                .execute();
+            .where(new ReferenceClientParam("subject").hasId(harmonizeId(fhirPatient))).prettyPrint()
+            .include(MedicationStatement.INCLUDE_PART_OF)
+            .include(MedicationStatement.INCLUDE_CONTEXT.asRecursive())
+            .execute();
 
         List<BundleEntryComponent> medicationStatements = bMedicationStatements.getEntry();
 
         for (int i = 0; i < medicationStatements.size(); i++) {
-            if (!(medicationStatements.get(i).getResource() instanceof MedicationStatement)) {
+            if (!(medicationStatements.get(i).getResource() instanceof MedicationStatement medicationStatement)) {
                 continue;
             }
-            MedicationStatement medicationStatement = (MedicationStatement) medicationStatements.get(i).getResource();
             followUps.add(FollowUpAdapter.toJson(settings.getRegex(), medicationStatement));
 
         }
@@ -231,8 +215,115 @@ public class JsonFhirMapper {
 
     }
 
+    public String uploadImage(final Image image) throws JsonProcessingException {
+        var bundle = new Bundle();
+        bundle.setType(Bundle.BundleType.TRANSACTION);
+
+        var binary = new Binary();
+        binary.setId(IdType.newRandomUuid());
+        binary.setContentType(image.contentType().display());
+        binary.setData(image.data().getBytes(StandardCharsets.UTF_8));
+
+        bundle.addEntry()
+            .setFullUrl(binary.getIdElement().getValue())
+            .setResource(binary)
+            .getRequest()
+            .setUrl("Binary")
+            .setMethod(Bundle.HTTPVerb.POST);
+
+        var bundledResponse = client.transaction().withBundle(bundle).execute();
+        var response = new ImageResponse(bundledResponse.getEntryFirstRep().getResponse().getLocation(), image.contentType().display());
+
+        return objectMapper.writeValueAsString(response);
+    }
+
+    public void savePresentation(final String patientId, final PresentationRequest presentation) {
+        var bundle = createTransactionBundle();
+        var presentationResource = createPresentationResource();
+        var nodes = createNodesForPresentationFromRequest(presentation);
+
+        addPatientIdIdentifier(presentationResource, patientId);
+        presentationResource.setNodes(nodes);
+        setupBundleEntry(bundle, presentationResource, patientId);
+
+        executeBundleTransaction(bundle);
+    }
+
+    private Bundle createTransactionBundle() {
+        var bundle = new Bundle();
+        bundle.setType(Bundle.BundleType.TRANSACTION);
+
+        return bundle;
+    }
+
+    private Presentation createPresentationResource() {
+        var presentation = new Presentation();
+        presentation.setId(IdType.newRandomUuid());
+
+        return presentation;
+    }
+
+    private void addPatientIdIdentifier(final Basic resource, final String patientId) {
+        var identifier = resource.addIdentifier();
+        identifier.setSystem(patientUri).setValue(patientId);
+        identifier.setUse(IdentifierUse.OFFICIAL);
+        identifier.getType().addCoding(Hl7TerminologyEnum.MR.toCoding());
+    }
+
+    private List<Presentation.Node> createNodesForPresentationFromRequest(final PresentationRequest presentationRequest) {
+        return presentationRequest.slides().entrySet().stream().flatMap(slide -> {
+            var slideId = slide.getKey();
+            var nodesInSlide = slide.getValue();
+            return nodesInSlide.stream().map(node -> new Presentation.Node(
+                new StringType(slideId.toString()),
+                new StringType(node.id()),
+                new IntegerType(node.position().left()),
+                new IntegerType(node.position().top()),
+                new StringType(node.type().toString()),
+                new StringType(node.value())));
+        }).toList();
+    }
+
+    private void setupBundleEntry(final Bundle bundle, final Presentation presentation, final String patientId) {
+        bundle.addEntry().setFullUrl(presentation.getIdElement().getValue()).setResource(presentation).getRequest()
+            .setUrl("Basic?identifier=" + patientUri + "|" + patientId)
+            .setMethod(Bundle.HTTPVerb.PUT);
+
+    }
+
+    public void executeBundleTransaction(final Bundle bundle) {
+        client.transaction().withBundle(bundle).execute();
+    }
+
+    public String loadPresentation(final String patientId) throws ResourceNotFoundException, ResourceGoneException, UnprocessableEntityException, JsonProcessingException {
+        Bundle bundle = client.search().forResource(Presentation.class).where(new TokenClientParam("identifier").exactly().systemAndCode(patientUri, patientId)).returnBundle(Bundle.class).execute();
+
+        if (bundle.getEntry().size() > 1) {
+            throw new UnprocessableEntityException("identifier has multiple matches");
+        }
+
+        var presentation = (Presentation) bundle.getEntryFirstRep().getResource();
+        var map = presentation.getNodes().stream().collect(Collectors.groupingBy(node -> node.getSlideId().getValue()));
+        var responseMap = new HashMap<UUID, List<SlideNode>>();
+        map.entrySet().forEach(slide -> {
+            var slideId = slide.getKey();
+            var nodes = slide.getValue();
+            var slideNodes = nodes.stream().map(node -> new SlideNode(node.getNodeId().getValue(), new Position(node.getLeft().getValue().longValue(), node.getTop().getValue().longValue()), NodeType.valueOf(node.getType().getValue()), node.getValue().getValue())).toList();
+            responseMap.put(UUID.fromString(slideId), slideNodes);
+        });
+        var response = new PresentationRequest(responseMap);
+
+        return objectMapper.writeValueAsString(response);
+    }
+
+    public void deletePresentation(final String patientId) {
+        var basic = new Basic();
+        basic.setId(new IdType("Basic", patientId));
+
+        client.delete().resource(basic).execute();
+    }
+
     /**
-     *
      * @param patientId id of the patient.
      * @param deletions entries that should be deleted. Either MTB or therapy
      *                  recommendation.
@@ -244,7 +335,7 @@ public class JsonFhirMapper {
         deletions.getMtb().forEach(mtb -> deleteMtb(patientId, mtb));
         deletions.getFollowUp().forEach(followUp -> deleteFollowUps(patientId, followUp));
         deletions.getTherapyRecommendation()
-                .forEach(therapyRecommendationId -> deleteTherapyRecommendation(patientId, therapyRecommendationId));
+            .forEach(therapyRecommendationId -> deleteTherapyRecommendation(patientId, therapyRecommendationId));
     }
 
     private void deleteTherapyRecommendation(String patientId, String therapyRecommendationId) {
@@ -252,7 +343,7 @@ public class JsonFhirMapper {
             throw new IllegalArgumentException("Invalid patientId!");
         }
         client.delete().resourceConditionalByUrl(
-                "Observation?identifier=" + therapyRecommendationUri + "|" + therapyRecommendationId).execute();
+            "Observation?identifier=" + therapyRecommendationUri + "|" + therapyRecommendationId).execute();
 
     }
 
@@ -268,12 +359,12 @@ public class JsonFhirMapper {
             throw new IllegalArgumentException("Invalid patientId!");
         }
         client.delete().resourceConditionalByUrl("MedicationStatement?identifier="
-            + followUpUri + "|" + followUpId).execute();
+                                                 + followUpUri + "|" + followUpId).execute();
 
         // Delete RECIST-response observations
         Bundle b = (Bundle) client.search().forResource(Observation.class)
             .where(new TokenClientParam("identifier")
-            .hasSystemWithAnyCode(responseUri))
+                .hasSystemWithAnyCode(responseUri))
             .prettyPrint().execute();
 
         for (BundleEntryComponent bec : b.getEntry()) {
@@ -290,8 +381,8 @@ public class JsonFhirMapper {
         patient.getIdentifierFirstRep().setUse(IdentifierUse.USUAL);
         patient.getIdentifierFirstRep().getType().addCoding(Hl7TerminologyEnum.MR.toCoding());
         b.addEntry().setFullUrl(patient.getIdElement().getValue()).setResource(patient).getRequest()
-                .setUrl("Patient?identifier=" + patientUri + "|" + patientId)
-                .setIfNoneExist("identifier=" + patientUri + "|" + patientId).setMethod(Bundle.HTTPVerb.PUT);
+            .setUrl("Patient?identifier=" + patientUri + "|" + patientId)
+            .setIfNoneExist("identifier=" + patientUri + "|" + patientId).setMethod(Bundle.HTTPVerb.PUT);
 
         return new Reference(patient);
     }
@@ -319,9 +410,9 @@ public class JsonFhirMapper {
         }
 
         Bundle bStuff = (Bundle) client.search().forResource(Observation.class)
-                .where(new TokenClientParam("component-value-concept").exactly()
-                        .systemAndValues(UriEnum.NCBI_GENE.getUri(), new ArrayList<>(entrez)))
-                .prettyPrint().revInclude(Observation.INCLUDE_DERIVED_FROM).execute();
+            .where(new TokenClientParam("component-value-concept").exactly()
+                .systemAndValues(UriEnum.NCBI_GENE.getUri(), new ArrayList<>(entrez)))
+            .prettyPrint().revInclude(Observation.INCLUDE_DERIVED_FROM).execute();
 
         Map<Integer, fhirspark.restmodel.Reference> refMap = new HashMap<>();
 
@@ -334,11 +425,11 @@ public class JsonFhirMapper {
             o.getExtensionsByUrl(GenomicsReportingEnum.RELATEDARTIFACT.getSystem()).forEach(relatedArtifact -> {
                 if (((RelatedArtifact) relatedArtifact.getValue()).getType() == RelatedArtifactType.CITATION) {
                     Integer pmid = Integer.valueOf(
-                            ((RelatedArtifact) relatedArtifact.getValue()).getUrl().replaceFirst(
-                                    UriEnum.PUBMED_URI.getUri(),
-                                    ""));
+                        ((RelatedArtifact) relatedArtifact.getValue()).getUrl().replaceFirst(
+                            UriEnum.PUBMED_URI.getUri(),
+                            ""));
                     refMap.put(pmid, new fhirspark.restmodel.Reference().withPmid(pmid)
-                            .withName(((RelatedArtifact) relatedArtifact.getValue()).getCitation()));
+                        .withName(((RelatedArtifact) relatedArtifact.getValue()).getCitation()));
                 }
             });
         }
@@ -355,7 +446,7 @@ public class JsonFhirMapper {
      * @return List of matching therapies
      */
     public Collection<TherapyRecommendation> getTherapyRecommendationsByAlteration(
-            List<GeneticAlteration> alterations) {
+        List<GeneticAlteration> alterations) {
 
         Set<String> entrez = new HashSet<>();
         for (GeneticAlteration a : alterations) {
@@ -363,9 +454,9 @@ public class JsonFhirMapper {
         }
 
         Bundle bStuff = (Bundle) client.search().forResource(Observation.class)
-                .where(new TokenClientParam("component-value-concept").exactly()
-                        .systemAndValues(UriEnum.NCBI_GENE.getUri(), new ArrayList<>(entrez)))
-                .prettyPrint().revInclude(Observation.INCLUDE_DERIVED_FROM).execute();
+            .where(new TokenClientParam("component-value-concept").exactly()
+                .systemAndValues(UriEnum.NCBI_GENE.getUri(), new ArrayList<>(entrez)))
+            .prettyPrint().revInclude(Observation.INCLUDE_DERIVED_FROM).execute();
 
         Map<String, TherapyRecommendation> tcMap = new HashMap<>();
 
@@ -395,9 +486,9 @@ public class JsonFhirMapper {
         }
 
         Bundle bStuff = (Bundle) client.search().forResource(Observation.class)
-                .where(new TokenClientParam("component-value-concept").exactly()
-                        .systemAndValues(UriEnum.NCBI_GENE.getUri(), new ArrayList<>(entrez)))
-                .prettyPrint().revInclude(Observation.INCLUDE_DERIVED_FROM).execute();
+            .where(new TokenClientParam("component-value-concept").exactly()
+                .systemAndValues(UriEnum.NCBI_GENE.getUri(), new ArrayList<>(entrez)))
+            .prettyPrint().revInclude(Observation.INCLUDE_DERIVED_FROM).execute();
 
         Map<String, FollowUp> tcMap = new HashMap<>();
 
